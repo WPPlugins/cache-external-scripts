@@ -41,6 +41,10 @@ We store the cached file in the wordpress `uploads` directory, in the folder cal
 
 == Changelog ==
 
+= 0.4 =
+* Refactored code into single object instead of multiple loose functions
+* Refactored code to WordPress Coding Standards
+
 = 0.3 =
 * Added support for new Google Analytics tracking codes using https protocol as standard
 * Small bug fix where cache being checked against the wrong file
