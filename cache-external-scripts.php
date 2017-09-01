@@ -3,7 +3,7 @@
  * Plugin Name: Cache External Scripts
  * Plugin URI: http://www.forcemedia.nl/wordpress-plugins/cache-external-scripts/
  * Description: This plugin allows you to cache the Google Analytics JavaScript file to be cached for more than 2 hours, for a better PageSpeed score
- * Version: 0.4
+ * Version: 0.5
  * Author: Diego Voors
  * Author URI: http://www.forcemedia.nl
  * License: GPL2
@@ -30,7 +30,7 @@ class CacheExternalScripts {
 	 *
 	 * @var array
 	 */
-	private $results = [];
+	private $results = array();
 
 	/**
 	 * Initialise the plugin
@@ -39,14 +39,14 @@ class CacheExternalScripts {
 		$this->init_vars();
 		$this->setup_cron();
 		$this->rewrite_html_output();
-		add_action( 'wp', [ $this, 'setup_cron' ] );
-		add_action( 'admin_menu', [ $this, 'add_admin_menu' ] );
-		add_action( 'admin_init', [ $this, 'settings_init' ] );
-		add_action( 'referesh_external_script_cache', [ $this, 'referesh_external_script_cache' ] );
+		add_action( 'wp', array( $this, 'setup_cron' ) );
+		add_action( 'admin_menu', array( $this, 'add_admin_menu' ) );
+		add_action( 'admin_init', array( $this, 'settings_init' ) );
+		add_action( 'referesh_external_script_cache', array( $this, 'referesh_external_script_cache' ) );
 		if ( WP_DEBUG ) {
-			add_action( 'wp_footer', [ $this, 'output_debug' ], 999999 );
+			add_action( 'wp_footer', array( $this, 'output_debug' ), 999999 );
 		}
-		register_deactivation_hook( __FILE__, [ __CLASS__, 'deactivate_plugin' ] );
+		register_deactivation_hook( __FILE__, array( __CLASS__, 'deactivate_plugin' ) );
 	}
 
 	/**
@@ -81,15 +81,15 @@ class CacheExternalScripts {
 	 * Rewrite the output HTML to use our local files instead of the remote ones.
 	 */
 	public function rewrite_html_output() {
-		add_action( 'get_header', [ $this, 'internal_ob_start' ] );
-		add_action( 'wp_footer', [ $this, 'internal_ob_end_flush' ], 99999 );
+		add_action( 'get_header', array( $this, 'internal_ob_start' ) );
+		add_action( 'wp_footer', array( $this, 'internal_ob_end_flush' ), 99999 );
 	}
 
 	/**
 	 * Start our own Output Buffering
 	 */
 	public function internal_ob_start() {
-		return ob_start( [ $this, 'filter_wp_head_output' ] );
+		return ob_start( array( $this, 'filter_wp_head_output' ) );
 	}
 
 	/**
@@ -201,31 +201,37 @@ class CacheExternalScripts {
 	 */
 	public function get_scripts_to_cache() {
 		$defaults = array(
-			'google-legacy-analytics' => [
+			'google-legacy-analytics' => array(
 				'external_url' => 'http://www.google-analytics.com/ga.js',
-				'basename' => 'ga.js',
 				'ob_str_replace' => array(
 					'pattern' => "ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';",
 					'replacement' => "ga.src = '{local_url}'",
 				),
-			],
-			'google-universal-analytics' => [
+			),
+			'google-universal-analytics' => array(
 				'external_url' => 'http://www.google-analytics.com/analytics.js',
-				'basename' => 'analytics.js',
 				'ob_preg_replace' => array(
 					'pattern' => '#(http:|https:|)//www.google-analytics.com/analytics.js#',
 					'replacement' => '{local_url}',
 				),
-			],
+			),
 		);
-		return $defaults;
+		$scripts = apply_filters( 'cache_external_scripts_list', $defaults );
+		// Check the scripts, and fill in any unset defaults.
+		foreach ( $scripts as $slug => $script ) {
+			if ( ! isset( $script['basename'] ) ) {
+				$path = wp_parse_url( $script['external_url'], PHP_URL_PATH );
+				$scripts[ $slug ]['basename'] = basename( $path );
+			}
+		}
+		return $scripts;
 	}
 
 	/**
 	 * Add our Admin Menu
 	 */
 	public function add_admin_menu() {
-		add_options_page( 'Cache External Scripts', 'Cache External Scripts', 'manage_options', 'cache-external-scripts', [ $this, 'options_page' ] );
+		add_options_page( 'Cache External Scripts', 'Cache External Scripts', 'manage_options', 'cache-external-scripts', array( $this, 'options_page' ) );
 	}
 
 	/**
