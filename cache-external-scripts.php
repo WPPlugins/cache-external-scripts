@@ -3,117 +3,302 @@
  * Plugin Name: Cache External Scripts
  * Plugin URI: http://www.forcemedia.nl/wordpress-plugins/cache-external-scripts/
  * Description: This plugin allows you to cache the Google Analytics JavaScript file to be cached for more than 2 hours, for a better PageSpeed score
- * Version: 0.3
+ * Version: 0.5
  * Author: Diego Voors
  * Author URI: http://www.forcemedia.nl
  * License: GPL2
  */
- 
-//Define uploads directory to store cached scripts
-$wp_upload_dir = wp_upload_dir();
-define('UPLOAD_BASE_DIR',$wp_upload_dir['basedir']);
-define('UPLOAD_BASE_URL',$wp_upload_dir['baseurl']);
 
-// create a scheduled event (if it does not exist already)
-function ces_cronstarter_activation() {
-	if( !wp_next_scheduled( 'cache-external-scripts-cron' ) ) {  
-	   wp_schedule_event( time(), 'daily', 'cache-external-scripts-cron' );  
+class CacheExternalScripts {
+	/**
+	 * Absolute path to the WordPRess uploads directory
+	 *
+	 * @var string
+	 */
+	private $upload_base_dir;
+
+	/**
+	 * URL path to the local uploads directory
+	 *
+	 * @var string
+	 */
+	private $upload_base_url;
+
+
+	/**
+	 * Array containing the results of what we've done, for testing and debugging
+	 *
+	 * @var array
+	 */
+	private $results = array();
+
+	/**
+	 * Initialise the plugin
+	 */
+	public function __construct() {
+		$this->init_vars();
+		$this->setup_cron();
+		$this->rewrite_html_output();
+		add_action( 'wp', array( $this, 'setup_cron' ) );
+		add_action( 'admin_menu', array( $this, 'add_admin_menu' ) );
+		add_action( 'admin_init', array( $this, 'settings_init' ) );
+		add_action( 'referesh_external_script_cache', array( $this, 'referesh_external_script_cache' ) );
+		if ( WP_DEBUG ) {
+			add_action( 'wp_footer', array( $this, 'output_debug' ), 999999 );
+		}
+		register_deactivation_hook( __FILE__, array( __CLASS__, 'deactivate_plugin' ) );
+	}
+
+	/**
+	 * Setup initial variables which we'll need later
+	 */
+	public function init_vars() {
+		$wp_upload_dir = wp_upload_dir();
+		$this->upload_base_dir = $wp_upload_dir['basedir'];
+		$this->upload_base_url = $wp_upload_dir['baseurl'];
+	}
+
+	/**
+	 * Output some the results of our replacements. Trigger this really, relly late
+	 * (after the internal_ob_end_flush). Automatically triggered if WP_Debug is enabled.
+	 */
+	public function output_debug() {
+		echo '<!-- BEGIN Cache External Scripts Debug Output -->';
+		print_r( $this->results );
+		echo '<!-- END Cache External Scripts Debug Output -->';
+	}
+
+	/**
+	 * Setup the CRON job to refresh the cached files
+	 */
+	public function setup_cron() {
+		if ( ! wp_next_scheduled( 'referesh_external_script_cache' ) ) {
+			wp_schedule_event( time(), 'daily', 'referesh_external_script_cache' );
+		}
+	}
+
+	/**
+	 * Rewrite the output HTML to use our local files instead of the remote ones.
+	 */
+	public function rewrite_html_output() {
+		add_action( 'get_header', array( $this, 'internal_ob_start' ) );
+		add_action( 'wp_footer', array( $this, 'internal_ob_end_flush' ), 99999 );
+	}
+
+	/**
+	 * Start our own Output Buffering
+	 */
+	public function internal_ob_start() {
+		return ob_start( array( $this, 'filter_wp_head_output' ) );
+	}
+
+	/**
+	 * Stop the Output Buffering we started
+	 */
+	public function internal_ob_end_flush() {
+		ob_end_flush();
+	}
+
+	/**
+	 * The callback for Output Buffering - rewrites the external references with
+	 * local ones
+	 *
+	 * @param string $input The original output.
+	 *
+	 * @return string The modified output
+	 */
+	public function filter_wp_head_output( $input ) {
+		foreach ( $this->get_scripts_to_cache() as $slug => $script ) {
+			if ( $this->script_is_cached( $script ) ) {
+				$this->cache_script( $script );
+			}
+
+			if ( isset( $script['ob_preg_replace'] ) ) {
+				$replacement = str_replace( '{local_url}', $local_url, $script['ob_preg_replace']['replacement'] );
+				$output = preg_replace( $script['ob_preg_replace']['pattern'], $replacement, $input );
+				if ( $output !== $input ) {
+					$this->results[] = 'Replaced: ' . $slug . ' with preg_replace.';
+				} else {
+					$this->results[] = 'Did not replace: ' . $slug . ' with preg_replace.';
+				}
+				$input = $output;
+			}
+
+			if ( isset( $script['ob_str_replace'] ) ) {
+				$replacement = str_replace( '{local_url}', $local_url, $script['ob_str_replace']['replacement'] );
+				$output = str_replace( $script['ob_str_replace']['pattern'], $replacement, $input );
+				if ( $output !== $input ) {
+					$this->results[] = 'Replaced: ' . $slug . ' with str_replace.';
+				} else {
+					$this->results[] = 'Did not replace: ' . $slug . ' with str_replace.';
+				}
+				$input = $output;
+			}
+		}
+		return $input;
+	}
+
+	/**
+	 * Given a script, check whether it's been cached
+	 *
+	 * @param  array $script Array including the key 'basename'.
+	 *
+	 * @return boolean Returns true if the file has been cached, or false if not.
+	 */
+	public function script_is_cached( $script ) {
+		return file_exists( $this->get_cached_script_path( $script ) );
+	}
+
+	/**
+	 * Get the path which should point to a cached script (whether it's been cached
+	 * locally or not)
+	 *
+	 * @param  array $script Array including the key 'basename'.
+	 *
+	 * @return string absolute path.
+	 */
+	public function get_cached_script_path( $script ) {
+		return $this->upload_base_dir . '/cached-scripts/' . $script['basename'];
+	}
+
+	/**
+	 * Given a script, check whether it's been cached
+	 *
+	 * @param array $script Array including the key 'basename' atleast 'external_url'.
+	 *
+	 * @return boolean Returns true if the file was successfully cached
+	 */
+	public function cache_script( $script ) {
+		$dir = $this->upload_base_dir . '/cached-scripts';
+		if ( ! file_exists( $dir ) && ! is_dir( $dir ) ) {
+			mkdir( $dir );
+		}
+
+		$remote_data = $this->get_data( $script['external_url'] );
+		if ( ! $remote_data ) {
+			return false;
+		}
+		$success = file_put_contents(
+			$this->get_cached_script_path( $script ),
+			$remote_data
+		);
+		return $success !== false;
+	}
+
+	/**
+	 * Update the locally cached files
+	 */
+	public function referesh_external_script_cache() {
+		foreach( $this->get_scripts_to_cache() as $index => $script ) {
+			$this->cache_script( $script );
+		}
+	}
+
+	/**
+	 * Get a list of scripts which need caching, along with useful information about them.
+	 *
+	 * @return [type] [description]
+	 */
+	public function get_scripts_to_cache() {
+		$defaults = array(
+			'google-legacy-analytics' => array(
+				'external_url' => 'http://www.google-analytics.com/ga.js',
+				'ob_str_replace' => array(
+					'pattern' => "ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';",
+					'replacement' => "ga.src = '{local_url}'",
+				),
+			),
+			'google-universal-analytics' => array(
+				'external_url' => 'http://www.google-analytics.com/analytics.js',
+				'ob_preg_replace' => array(
+					'pattern' => '#(http:|https:|)//www.google-analytics.com/analytics.js#',
+					'replacement' => '{local_url}',
+				),
+			),
+		);
+		$scripts = apply_filters( 'cache_external_scripts_list', $defaults );
+		// Check the scripts, and fill in any unset defaults.
+		foreach ( $scripts as $slug => $script ) {
+			if ( ! isset( $script['basename'] ) ) {
+				$path = wp_parse_url( $script['external_url'], PHP_URL_PATH );
+				$scripts[ $slug ]['basename'] = basename( $path );
+			}
+		}
+		return $scripts;
+	}
+
+	/**
+	 * Add our Admin Menu
+	 */
+	public function add_admin_menu() {
+		add_options_page( 'Cache External Scripts', 'Cache External Scripts', 'manage_options', 'cache-external-scripts', array( $this, 'options_page' ) );
+	}
+
+	/**
+	 * Register our settings
+	 */
+	public function settings_init() {
+		register_setting( 'pluginPage', 'ces_settings', 'validate_input' );
+	}
+
+	/**
+	 * Output our Options page
+	 */
+	function options_page() {
+		?>
+			<h1>Cache External Sources</h1>
+		<?php
+		if ( 'cache-scripts' === $_GET['action'] ) {
+			echo '<p>Fetching scripts...';
+			$this->referesh_external_script_cache();
+			echo 'done</p>';
+		}
+		echo '<ul>';
+		foreach ( $this->get_scripts_to_cache() as $script ) {
+			echo '<li>';
+			echo esc_html( $script['basename'] ) . ' : ';
+			if ( $this->script_is_cached( $script ) ) {
+				$time_since_update = time() - filemtime( $this->get_cached_script_path( $script ) );
+				echo 'Last Updated: ' . esc_html( round( $time_since_update / 60) ) . ' minutes ago';
+			} else {
+				echo 'Not Cached';
+			}
+			echo '</li>';
+		}
+		echo '</ul>';
+		echo '<p>In case you want to force the cache to be renewed, click';
+	 	echo ' <a href="' . esc_attr( get_site_url() ) . '/wp-admin/options-general.php?page=cache-external-scripts&action=cache-scripts">';
+		echo 'this link</a>';
+	}
+
+
+
+	/**
+	 * Get the data from a URL
+	 *
+	 * @param string $url Absolute URL to get the data from.
+	 *
+	 * @return text The contents of the file
+	 */
+	static function get_data( $url ) {
+		$ch = curl_init();
+		$timeout = 5;
+		curl_setopt( $ch, CURLOPT_URL, $url );
+		curl_setopt( $ch, CURLOPT_RETURNTRANSFER, 1 );
+		curl_setopt( $ch, CURLOPT_CONNECTTIMEOUT, $timeout );
+		$data = curl_exec( $ch );
+		curl_close( $ch );
+		return $data;
+	}
+
+	/**
+	 * When the plugin is deactivated, remove the cron job and tidy up.
+	 */
+	public static function deactivate_plugin() {
+		// find out when the last event was scheduled.
+		$timestamp = wp_next_scheduled( 'referesh_external_script_cache' );
+		// unschedule previous event if any.
+		wp_unschedule_event( $timestamp, 'referesh_external_script_cache' );
 	}
 }
-// and make sure it's called whenever WordPress loads
-add_action('wp', 'ces_cronstarter_activation');
-
-
-// unschedule event upon plugin deactivation
-function ces_cronstarter_deactivate() {	
-	// find out when the last event was scheduled
-	$timestamp = wp_next_scheduled ('cache-external-scripts-cron');
-	// unschedule previous event if any
-	wp_unschedule_event ($timestamp, 'cache-external-scripts-cron');
-} 
-register_deactivation_hook (__FILE__, 'ces_cronstarter_deactivate');
-
-function get_data($url) {
-	$ch = curl_init();
-	$timeout = 5;
-	curl_setopt($ch, CURLOPT_URL, $url);
-	curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-	curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
-	$data = curl_exec($ch);
-	curl_close($ch);
-	return $data;
-}
-
-// here's the function we'd like to call with our cron job
-function function_cache_external_scripts() {
-	
-	$dir = UPLOAD_BASE_DIR.'/cached-scripts';
-	if (!file_exists($dir) && !is_dir($dir)) {
-		mkdir($dir);         
-	}
-	
-	$analytics_data = get_data('http://www.google-analytics.com/analytics.js');
-	if($analytics_data AND (!file_exists(UPLOAD_BASE_DIR.'/cached-scripts/analytics.js') OR $analytics_data!=file_get_contents(UPLOAD_BASE_DIR.'/cached-scripts/analytics.js'))){
-		$fp = fopen(UPLOAD_BASE_DIR.'/cached-scripts/analytics.js',"wb");
-		fwrite($fp,$analytics_data);
-		fclose($fp);
-	}
-	
-	$ga_data = get_data('http://www.google-analytics.com/ga.js');
-	if($ga_data AND (!file_exists(UPLOAD_BASE_DIR.'/cached-scripts/ga.js') OR $ga_data!=file_get_contents(UPLOAD_BASE_DIR.'/cached-scripts/ga.js'))){
-		$fp = fopen(UPLOAD_BASE_DIR.'/cached-scripts/ga.js',"wb");
-		fwrite($fp,$ga_data);
-		fclose($fp);
-	}
-	
-}
-// hook that function onto our scheduled event:
-add_action ('cache-external-scripts-cron', 'function_cache_external_scripts'); 
-
-
-add_action('get_header', 'ces_ob_start');
-add_action('wp_footer', 'ces_ob_end_flush', 99999);
-function ces_ob_start() {
-    ob_start('ces_filter_wp_head_output');
-}
-function ces_ob_end_flush() {
-    ob_end_flush();
-}
-function ces_filter_wp_head_output($output) {
-	if(file_exists(UPLOAD_BASE_DIR.'/cached-scripts/analytics.js')){
-		$output = preg_replace('#(http:|https:|)//www.google-analytics.com/analytics.js#',UPLOAD_BASE_URL.'/cached-scripts/analytics.js',$output);
-	}
-	if(file_exists(UPLOAD_BASE_DIR.'/cached-scripts/ga.js')){
-		$output = str_replace("ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';","ga.src = '".UPLOAD_BASE_URL."/cached-scripts/ga.js'",$output);
-	}
-    return $output;
-}
-
-add_action( 'admin_menu', 'ces_add_admin_menu' );
-add_action( 'admin_init', 'ces_settings_init' );
-
-function ces_add_admin_menu(  ) { 
-	add_options_page( 'Cache External Scripts', 'Cache External Scripts', 'manage_options', 'cache-external-scripts', 'ces_options_page' );
-}
-
-
-function ces_settings_init(  ) { 
-	register_setting( 'pluginPage', 'ces_settings', 'validate_input' );
-}
-
-function ces_options_page(  ) { 
-	?>
-		<h1>Cache External Sources</h1>
-	<?php
-	if($_GET['action']=='cache-scripts'){
-		echo 'Fetching scripts...</p>';
-		function_cache_external_scripts();
-	}
-	if(file_exists(UPLOAD_BASE_DIR.'/cached-scripts/analytics.js') AND file_exists(UPLOAD_BASE_DIR.'/cached-scripts/ga.js')){
-		echo '<p>Google Analytics file (analytics.js) succesfully cached on local server!</p><p>In case you want to force the cache to be renewed, click <a href="'.get_site_url().'/wp-admin/options-general.php?page=cache-external-scripts&action=cache-scripts">this link</a>
-		
-		<span style="margin-top:70px;background-color:#fff;padding:10px;border:1px solid #C42429;display:inline-block;">Did this plugin help you to leverage browser caching and increase your PageSpeed Score? <a href="https://wordpress.org/support/view/plugin-reviews/cache-external-scripts" target="_blank">Please rate the plugin</a>!<br />Did not work for your site? <a href="https://wordpress.org/support/plugin/cache-external-scripts" target="_blank">Please let us know</a>!</span>';
-	}else{
-		echo '<p>Google Analytics file (analytics.js) is not cached yet on the local server. Please refresh <a href="'.get_site_url().'" target="_blank">your frontpage</a> to start the cron or start it manually by pressing <a href="'.get_site_url().'/wp-admin/options-general.php?page=cache-external-scripts&action=cache-scripts">this link</a>.</p>';
-	}
-}
+new CacheExternalScripts;
